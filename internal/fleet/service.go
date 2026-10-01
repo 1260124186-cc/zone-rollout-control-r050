@@ -30,15 +30,21 @@ func (s *Service) Enroll(ctx context.Context, input domain.NodeCreateInput) (dom
 		state = domain.NodeQuarantined
 	}
 	node := domain.ResolverNode{
-		ID:        s.ids.New("nod"),
-		NodeName:  input.NodeName,
-		Region:    input.Region,
-		State:     state,
-		Version:   1,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:           s.ids.New("nod"),
+		NodeName:     input.NodeName,
+		Region:       input.Region,
+		State:        state,
+		Capabilities: append([]string(nil), input.Capabilities...),
+		Version:      1,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	err := s.store.Write(ctx, func(state *domain.State) error {
+		if len(state.Nodes) >= domain.MaxCapacityRequired {
+			return domain.InvalidState("node fleet is at capacity", map[string]any{
+				"maximum_nodes": domain.MaxCapacityRequired,
+			})
+		}
 		for _, existing := range state.Nodes {
 			if existing.NodeName == node.NodeName {
 				return domain.NewError(domain.CodeConflict, "node name is already enrolled", map[string]any{
@@ -48,8 +54,9 @@ func (s *Service) Enroll(ctx context.Context, input domain.NodeCreateInput) (dom
 		}
 		state.Nodes[node.ID] = node
 		store.AddAudit(state, s.ids, "node", node.ID, "enrolled", now, map[string]any{
-			"node_name": node.NodeName,
-			"region":    node.Region,
+			"node_name":    node.NodeName,
+			"region":       node.Region,
+			"capabilities": node.Capabilities,
 		})
 		return nil
 	})

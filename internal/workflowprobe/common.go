@@ -15,6 +15,16 @@ func enrollNode(harness *harness, name string, region string) (domain.ResolverNo
 	return node, err
 }
 
+func enrollNodeWithCapabilities(harness *harness, name string, region string, capabilities []string) (domain.ResolverNode, error) {
+	var node domain.ResolverNode
+	err := harness.call(http.MethodPut, "/v1/nodes", domain.NodeCreateInput{
+		NodeName:     name,
+		Region:       region,
+		Capabilities: capabilities,
+	}, &node)
+	return node, err
+}
+
 func createActivePlan(
 	harness *harness,
 	zone string,
@@ -54,6 +64,12 @@ func createActivePlan(
 	return plan, revision, nil
 }
 
+func checkCapacity(harness *harness, planID string, path string) (domain.CapacityCheck, error) {
+	var result domain.CapacityCheck
+	err := harness.call(http.MethodGet, "/v1/plans/"+planID+"/capacity"+path, nil, &result)
+	return result, err
+}
+
 func allocate(
 	harness *harness,
 	planID string,
@@ -67,6 +83,25 @@ func allocate(
 		Region:       region,
 		LeaseSeconds: 600,
 		MaxNodes:     maxNodes,
+	}, &group)
+	return group, err
+}
+
+func allocateWithCapabilities(
+	harness *harness,
+	planID string,
+	requestKey string,
+	region string,
+	maxNodes int,
+	capabilities []string,
+) (domain.LeaseGroup, error) {
+	var group domain.LeaseGroup
+	err := harness.call(http.MethodPatch, "/v1/plans/"+planID+"/leases", domain.LeaseInput{
+		RequestKey:   requestKey,
+		Region:       region,
+		LeaseSeconds: 600,
+		MaxNodes:     maxNodes,
+		Capabilities: capabilities,
 	}, &group)
 	return group, err
 }

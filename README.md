@@ -53,14 +53,15 @@ internal/workflowprobe      真实 HTTP 路径验证
 
 以下示例假设服务监听 `127.0.0.1:8090`。
 
-登记解析节点：
+登记解析节点（全系统最多 500 个节点）：
 
 ```bash
 curl -sS -X PUT http://127.0.0.1:8090/v1/nodes \
   -H 'Content-Type: application/json' \
   -d '{
     "node_name": "resolver-east-01",
-    "region": "east"
+    "region": "east",
+    "capabilities": ["dnssec", "ipv6"]
   }'
 ```
 
@@ -100,6 +101,14 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/activate \
   -d '{"expected_version": 2}'
 ```
 
+只读容量预检：
+
+```bash
+curl -sS 'http://127.0.0.1:8090/v1/plans/<plan_id>/capacity?required_nodes=2&region=east&capability=dnssec&capability=ipv6'
+```
+
+预检返回候选节点、可用数量、稳定阻塞原因、状态快照版本、能力目录版本和 15 秒有效期；它不保留节点。正式分配仍会在写事务中重新检查节点状态和能力。
+
 分配节点租约：
 
 ```bash
@@ -109,7 +118,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/leases \
     "request_key": "lease-request-0001",
     "region": "east",
     "lease_seconds": 600,
-    "max_nodes": 2
+    "max_nodes": 2,
+    "capabilities": ["dnssec"]
   }'
 ```
 
@@ -174,6 +184,7 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PATCH` | `/v1/plans/{id}/activate` | 激活计划 |
 | `PATCH` | `/v1/plans/{id}/complete` | 完成计划 |
 | `PATCH` | `/v1/plans/{id}/leases` | 给节点分配租约 |
+| `GET` | `/v1/plans/{id}/capacity` | 只读预检区域容量和能力条件 |
 | `PATCH` | `/v1/leases/{id}/release` | 提前释放租约 |
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
@@ -188,6 +199,8 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
+- 容量预检只读取当前快照，不创建租约、不改变节点、不写审计；结果 15 秒后失效，不能作为正式分配保证。
+- 正式分配始终在当前写事务中重新验证计划、节点状态、区域和全部能力条件，然后才生成租约。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
 
 ## 后续工程任务的行为边界

@@ -21,6 +21,12 @@ func normalize(state domain.State) domain.State {
 	if state.Nodes == nil {
 		state.Nodes = make(map[string]domain.ResolverNode)
 	}
+	for nodeID, node := range state.Nodes {
+		if node.Capabilities == nil {
+			node.Capabilities = []string{}
+		}
+		state.Nodes[nodeID] = node
+	}
 	if state.Leases == nil {
 		state.Leases = make(map[string]domain.NodeLease)
 	}

@@ -42,10 +42,11 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 
 ### ResolverNode
 
-边缘解析节点档案。
+边缘解析节点档案。全系统最多登记 500 个节点，保证大批量容量计算和返回节点清单均有上界。
 
 - `id`、`node_name`、`region`。
 - `state`：`ready`、`leased` 或 `quarantined`。
+- `capabilities`：节点具备的能力代码，规范化、去重并稳定排序；查询租约时可按全部指定能力过滤。
 - `version`、`created_at`、`updated_at`。
 
 ### NodeLease
@@ -170,16 +171,44 @@ ready --lease--> leased --report--> ready
 
 步骤：
 
-1. 入口校验计划、区域、请求键、租约秒数和数量。
+1. 入口校验计划、区域、请求键、租约秒数、数量和可选能力条件。
 2. 分配服务清理已到期租约。
-3. 按区域筛选 `ready` 节点并以稳定顺序选择。
+3. 按区域和全部能力条件筛选 `ready` 节点并以稳定顺序选择；正式分配不接受预检令牌或缓存结论，必须在当前写事务中重新验证资格。
 4. 在一个事务中把节点改为 `leased`，写入租约组和租约。
 
 成功行为：每个节点获得一个有期限的 `claimed` 租约。
 
 失败行为：计划非活动、无可用节点、请求键同键异载荷或保存失败时不会产生部分租约。
 
-### W3 探针登记
+### W3 只读容量预检
+
+入口：`GET /v1/plans/{id}/capacity`。
+
+查询参数：
+
+- `required_nodes`：需要的节点数量，范围 1 到 500，默认 1。
+- `region`：可选区域筛选。
+- `capability`：可重复的能力条件；节点必须同时具备全部能力。
+- `node_limit`：返回节点清单上限，范围 1 到 100，默认 100。
+
+步骤：
+
+1. HTTP 层校验查询参数，并规范化区域与能力条件。
+2. 容量服务在读锁内取得一个一致的状态快照视图。
+3. 纯领域计算筛选隔离、占用、区域和能力均符合的节点，稳定排序。
+4. 返回可用节点、稳定阻塞原因、状态快照版本、能力目录版本和 15 秒结果有效期。
+
+成功行为：预检不创建租约、不修改节点、不写审计，也不持久化预检结果；同一状态快照和能力目录上的重复预检得到相同节点、计数、原因和版本。预检只代表查询时状态，`result_valid_until` 后失效，不构成预留或分配保证。
+
+阻塞原因：
+
+- `plan_not_active`
+- `no_available_nodes`
+- `insufficient_available_nodes`
+- `unknown_capability`
+- `capability_unavailable`
+
+### W4 探针登记
 
 入口：`PATCH /v1/leases/{id}/probes`。
 
@@ -194,7 +223,7 @@ ready --lease--> leased --report--> ready
 
 失败行为：租约过期、计划未激活、同键异载荷或持久化失败时保持原状态。
 
-### W4 一致性判定
+### W5 一致性判定
 
 入口：
 
@@ -247,7 +276,7 @@ ready --lease--> leased --report--> ready
 主要路由：
 
 - `GET /healthz`
-- `PUT /v1/nodes`
+- `PUT /v1/nodes`：登记解析节点，最多保留 500 个节点档案。
 - `GET /v1/nodes`
 - `PUT /v1/plans`
 - `GET /v1/plans`
@@ -256,6 +285,7 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/plans/{id}/activate`
 - `PATCH /v1/plans/{id}/complete`
 - `PATCH /v1/plans/{id}/leases`
+- `GET /v1/plans/{id}/capacity`
 - `PATCH /v1/leases/{id}/release`
 - `PATCH /v1/leases/{id}/probes`
 - `PATCH /v1/plans/{id}/assessments`
@@ -270,7 +300,8 @@ ready --lease--> leased --report--> ready
 - 原子持久化：事务先复制状态，成功后再通过临时文件替换快照。
 - 错误传播：领域错误稳定映射到 HTTP 状态和错误代码。
 - 边界校验：DNS 名称、IP、序列号、延迟、比例、分页和能力均显式验证。
-- 并发入口：HTTP 处理器可并发运行，状态修改通过互斥锁串行化。
+- 并发入口：HTTP 处理器可并发运行，状态修改通过互斥锁串行化；只读容量预检使用读锁和单快照计算，节点档案总数和请求数量最大为 500，节点清单最多返回 100 项。
+- 能力目录：能力来源于节点档案，预检返回目录摘要版本；节点能力或节点集合变化会改变摘要。
 
 这些机制为后续工程任务提供了多个独立行为面，但本阶段不创建缺陷、不写测试，也不生成缺陷票据。
 

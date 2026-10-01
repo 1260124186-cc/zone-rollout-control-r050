@@ -2,8 +2,6 @@ package allocation
 
 import (
 	"context"
-	"sort"
-	"strings"
 	"time"
 
 	"solo-0014-zone-rollout-control/internal/domain"
@@ -21,6 +19,39 @@ func New(stateStore *store.Store, clock platform.Clock, ids platform.IDGenerator
 	return &Service{store: stateStore, clock: clock, ids: ids}
 }
 
+func (s *Service) CheckCapacity(
+	ctx context.Context,
+	planID string,
+	input domain.CapacityCheckInput,
+) (domain.CapacityCheck, error) {
+	if err := domain.ValidateCapacityCheckInput(input); err != nil {
+		return domain.CapacityCheck{}, err
+	}
+	input = domain.NormalizeCapacityCheckInput(input)
+	now := s.clock.Now().UTC()
+	var result domain.CapacityCheck
+	err := s.store.Read(ctx, func(state *domain.State) error {
+		plan, ok := state.Plans[planID]
+		if !ok {
+			return domain.NotFound("plan", planID)
+		}
+		nodes := make([]domain.ResolverNode, 0, len(state.Nodes))
+		for _, node := range state.Nodes {
+			nodes = append(nodes, node)
+		}
+		result = domain.BuildCapacityCheck(
+			plan,
+			nodes,
+			state.Leases,
+			input,
+			state.Revision,
+			now,
+		)
+		return nil
+	})
+	return result, err
+}
+
 func (s *Service) Allocate(
 	ctx context.Context,
 	planID string,
@@ -29,7 +60,7 @@ func (s *Service) Allocate(
 	if err := domain.ValidateLeaseInput(input); err != nil {
 		return domain.LeaseGroup{}, err
 	}
-	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input = domain.NormalizeLeaseInput(input)
 	requestIndex := planID + "\x00" + input.RequestKey
 	fingerprint := domain.LeaseFingerprint(planID, input)
 	now := s.clock.Now().UTC()
@@ -63,28 +94,31 @@ func (s *Service) Allocate(
 		}
 
 		expireLeases(state, now)
-		candidates := make([]domain.ResolverNode, 0)
-		for _, node := range state.Nodes {
-			if node.State != domain.NodeReady {
-				continue
-			}
-			if input.Region != "" && node.Region != input.Region {
-				continue
-			}
-			candidates = append(candidates, node)
-		}
+		// A capacity precheck is not a reservation. Recompute eligibility in
+		// this write transaction against the current snapshot and catalog.
+		candidates := domain.SelectAvailableNodes(
+			state.Nodes,
+			state.Leases,
+			input.Region,
+			input.Capabilities,
+			now,
+		)
 		if len(candidates) == 0 {
 			return domain.NewError(domain.CodeNodeUnavailable, "no eligible node is ready", map[string]any{
-				"plan_id": planID,
-				"region":  input.Region,
+				"plan_id":      planID,
+				"region":       input.Region,
+				"capabilities": input.Capabilities,
 			})
 		}
-		sort.Slice(candidates, func(i, j int) bool {
-			if candidates[i].Region != candidates[j].Region {
-				return candidates[i].Region < candidates[j].Region
-			}
-			return candidates[i].ID < candidates[j].ID
-		})
+		if len(candidates) < input.MaxNodes {
+			return domain.NewError(domain.CodeNodeUnavailable, "fewer eligible nodes are ready than requested", map[string]any{
+				"plan_id":         planID,
+				"region":          input.Region,
+				"capabilities":    input.Capabilities,
+				"requested_nodes": input.MaxNodes,
+				"available_nodes": len(candidates),
+			})
+		}
 		if len(candidates) > input.MaxNodes {
 			candidates = candidates[:input.MaxNodes]
 		}
@@ -121,8 +155,9 @@ func (s *Service) Allocate(
 		state.LeaseGroups[group.ID] = group
 		state.LeaseRequestKeys[requestIndex] = group.ID
 		store.AddAudit(state, s.ids, "lease_group", group.ID, "created", now, map[string]any{
-			"plan_id":     planID,
-			"lease_count": len(leaseIDs),
+			"plan_id":      planID,
+			"lease_count":  len(leaseIDs),
+			"capabilities": input.Capabilities,
 		})
 		return nil
 	})

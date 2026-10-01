@@ -74,13 +74,14 @@ type RolloutPlan struct {
 }
 
 type ResolverNode struct {
-	ID        string    `json:"id"`
-	NodeName  string    `json:"node_name"`
-	Region    string    `json:"region"`
-	State     NodeState `json:"state"`
-	Version   uint64    `json:"version"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	NodeName     string    `json:"node_name"`
+	Region       string    `json:"region"`
+	State        NodeState `json:"state"`
+	Capabilities []string  `json:"capabilities"`
+	Version      uint64    `json:"version"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type NodeLease struct {
@@ -170,4 +171,40 @@ type PlanPage struct {
 type NodePage struct {
 	Items []ResolverNode `json:"items"`
 	Meta  PageMeta       `json:"meta"`
+}
+
+type CapacityCheckInput struct {
+	Region       string
+	Required     int
+	Capabilities []string
+	NodeLimit    int
+}
+
+type CapacityCheck struct {
+	PlanID                string         `json:"plan_id"`
+	PlanState             PlanState      `json:"plan_state"`
+	Region                string         `json:"region,omitempty"`
+	Required              int            `json:"required_nodes"`
+	RequiredCapabilities  []string       `json:"required_capabilities"`
+	AvailableCount        int            `json:"available_count"`
+	NodeCountReturned     int            `json:"node_count_returned"`
+	NodeLimit             int            `json:"node_limit"`
+	Sufficient            bool           `json:"sufficient"`
+	Nodes                 []CapacityNode `json:"nodes"`
+	BlockingReasons       []string       `json:"blocking_reasons"`
+	UnknownCapabilities   []string       `json:"unknown_capabilities,omitempty"`
+	Blocked               bool           `json:"blocked"`
+	SnapshotRevision      uint64         `json:"snapshot_revision"`
+	CatalogRevision       string         `json:"catalog_revision"`
+	CheckedAt             time.Time      `json:"checked_at"`
+	ResultValidUntil      time.Time      `json:"result_valid_until"`
+	ResultValiditySeconds int            `json:"result_validity_seconds"`
+}
+
+type CapacityNode struct {
+	ID           string    `json:"id"`
+	Region       string    `json:"region"`
+	State        NodeState `json:"state"`
+	Version      uint64    `json:"version"`
+	Capabilities []string  `json:"capabilities"`
 }

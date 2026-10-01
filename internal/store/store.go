@@ -51,6 +51,9 @@ func (s *Store) Revision() uint64 {
 	return s.state.Revision
 }
 
+// Read invokes fn while holding the read lock. Callers must not retain or
+// mutate maps returned from the state after Read returns; build bounded
+// responses inside fn.
 func (s *Store) Read(ctx context.Context, fn func(*domain.State) error) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -9,13 +10,16 @@ import (
 )
 
 const (
-	MaxZoneRunes       = 253
-	MaxAuthorityRunes  = 253
-	MaxNodeNameRunes   = 180
-	MaxRegionRunes     = 48
-	MinRequestKeyRunes = 8
-	MaxRequestKeyRunes = 64
-	MaxEntries         = 500
+	MaxZoneRunes          = 253
+	MaxAuthorityRunes     = 253
+	MaxNodeNameRunes      = 180
+	MaxRegionRunes        = 48
+	MinRequestKeyRunes    = 8
+	MaxRequestKeyRunes    = 64
+	MaxEntries            = 500
+	MaxCapabilities       = 16
+	MaxCapacityRequired   = 500
+	MaxCapacityNodes      = 100
 )
 
 type PlanCreateInput struct {
@@ -32,16 +36,19 @@ type RevisionCreateInput struct {
 }
 
 type NodeCreateInput struct {
-	NodeName   string `json:"node_name"`
-	Region     string `json:"region"`
-	Quarantine bool   `json:"quarantine"`
+	NodeName     string   `json:"node_name"`
+	Region       string   `json:"region"`
+	Quarantine   bool     `json:"quarantine"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type LeaseInput struct {
-	RequestKey   string `json:"request_key"`
-	Region       string `json:"region"`
-	LeaseSeconds int    `json:"lease_seconds"`
-	MaxNodes     int    `json:"max_nodes"`
+	RequestKey           string   `json:"request_key"`
+	Region               string   `json:"region"`
+	LeaseSeconds         int      `json:"lease_seconds"`
+	MaxNodes             int      `json:"max_nodes"`
+	Capabilities         []string `json:"capabilities,omitempty"`
+	RequiredCapabilities []string `json:"required_capabilities,omitempty"`
 }
 
 type ProbeInput struct {
@@ -176,14 +183,16 @@ func ValidateRevisionInput(input RevisionCreateInput) error {
 }
 
 func ValidateNodeInput(input NodeCreateInput, now time.Time) error {
-	input.NodeName = canonicalName(input.NodeName)
-	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input = NormalizeNodeInput(input)
 	details := make(map[string]any)
 	if err := validateCanonicalName(input.NodeName); err != nil {
 		details["node_name"] = err.Error()
 	}
 	if count := utf8.RuneCountInString(input.Region); count < 2 || count > MaxRegionRunes {
 		details["region"] = "must contain between 2 and 48 characters"
+	}
+	for key, value := range validateCapabilities(input.Capabilities) {
+		details[key] = value
 	}
 	if len(details) > 0 {
 		return Validation("node input is invalid", details)
@@ -194,12 +203,75 @@ func ValidateNodeInput(input NodeCreateInput, now time.Time) error {
 func NormalizeNodeInput(input NodeCreateInput) NodeCreateInput {
 	input.NodeName = canonicalName(input.NodeName)
 	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input.Capabilities = NormalizeCapabilities(input.Capabilities)
+	return input
+}
+
+func NormalizeCapabilities(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(strings.ToLower(value))
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func validateCapabilities(values []string) map[string]any {
+	details := make(map[string]any)
+	if len(values) > MaxCapabilities {
+		details["capabilities"] = fmt.Sprintf("must contain at most %d items", MaxCapabilities)
+		return details
+	}
+	seen := make(map[string]struct{}, len(values))
+	for index, value := range values {
+		value = strings.TrimSpace(strings.ToLower(value))
+		if value == "" {
+			details[fmt.Sprintf("capabilities.%d", index)] = "is required"
+			continue
+		}
+		if count := utf8.RuneCountInString(value); count > MaxRegionRunes {
+			details[fmt.Sprintf("capabilities.%d", index)] = "must be at most 48 characters"
+		}
+		for _, r := range value {
+			if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+				continue
+			}
+			details[fmt.Sprintf("capabilities.%d", index)] = "may contain only lowercase letters, digits, hyphens, and underscores"
+			break
+		}
+		if _, exists := seen[value]; exists {
+			details[fmt.Sprintf("capabilities.%d", index)] = "is duplicated"
+		}
+		seen[value] = struct{}{}
+	}
+	return details
+}
+
+func NormalizeLeaseInput(input LeaseInput) LeaseInput {
+	input.RequestKey = strings.TrimSpace(input.RequestKey)
+	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input.Capabilities = NormalizeCapabilities(append(
+		append([]string(nil), input.Capabilities...),
+		input.RequiredCapabilities...,
+	))
+	input.RequiredCapabilities = nil
 	return input
 }
 
 func ValidateLeaseInput(input LeaseInput) error {
-	input.RequestKey = strings.TrimSpace(input.RequestKey)
-	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input = NormalizeLeaseInput(input)
 	details := make(map[string]any)
 	if err := validateRequestKey(input.RequestKey); err != nil {
 		details["request_key"] = err.Error()
@@ -210,11 +282,44 @@ func ValidateLeaseInput(input LeaseInput) error {
 	if input.LeaseSeconds < 30 || input.LeaseSeconds > 86400 {
 		details["lease_seconds"] = "must be between 30 and 86400"
 	}
-	if input.MaxNodes < 1 || input.MaxNodes > 100 {
-		details["max_nodes"] = "must be between 1 and 100"
+	if input.MaxNodes < 1 || input.MaxNodes > MaxCapacityRequired {
+		details["max_nodes"] = "must be between 1 and 500"
+	}
+	for key, value := range validateCapabilities(input.Capabilities) {
+		details[key] = value
 	}
 	if len(details) > 0 {
 		return Validation("lease input is invalid", details)
+	}
+	return nil
+}
+
+func NormalizeCapacityCheckInput(input CapacityCheckInput) CapacityCheckInput {
+	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input.Capabilities = NormalizeCapabilities(input.Capabilities)
+	if input.NodeLimit == 0 {
+		input.NodeLimit = MaxCapacityNodes
+	}
+	return input
+}
+
+func ValidateCapacityCheckInput(input CapacityCheckInput) error {
+	input = NormalizeCapacityCheckInput(input)
+	details := make(map[string]any)
+	if count := utf8.RuneCountInString(input.Region); count > MaxRegionRunes {
+		details["region"] = "must be at most 48 characters"
+	}
+	if input.Required < 1 || input.Required > MaxCapacityRequired {
+		details["required"] = "must be between 1 and 500"
+	}
+	if input.NodeLimit < 1 || input.NodeLimit > MaxCapacityNodes {
+		details["node_limit"] = "must be between 1 and 100"
+	}
+	for key, value := range validateCapabilities(input.Capabilities) {
+		details[key] = value
+	}
+	if len(details) > 0 {
+		return Validation("capacity check input is invalid", details)
 	}
 	return nil
 }
