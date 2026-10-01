@@ -212,6 +212,30 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 只读容量预检
+
+入口：
+
+- `POST /v1/plans/{id}/capacity-prechecks`
+- `GET /v1/capabilities`
+- `PUT /v1/capabilities`
+
+预检请求包含可选 `region`、`quantity`（1 到 100）和可选 `required_capabilities`（最多 16 个已注册能力名）。
+
+步骤：
+
+1. HTTP 层严格解码 JSON。
+2. 预检服务校验区域、数量和能力名语法。
+3. 存储层在读锁内取得单一不可变快照；并发节点变化、租约变化和能力目录更新都不会混入同一次预检。
+4. 纯领域计算器模拟租约到期占用，按区域、占用状态和能力条件筛选节点，输出稳定排序并截断到 `quantity` 的节点视图、计数和稳定阻塞原因。
+5. 返回确定性预检标识、快照版本、能力目录版本和 30 秒有效期。
+
+成功行为：可满足时返回 `satisfiable=true` 且无阻塞原因；不可满足时返回 `satisfiable=false` 与 `plan_not_active`、`capacity_insufficient`（详情含就绪/已租/隔离计数）等稳定原因。预检不创建租约、不改变节点、不写审计事件。同一快照和目录版本上重复预检结果完全一致；节点变化推进快照版本，目录键集合变化推进目录版本。
+
+失败行为：计划不存在返回 `not_found`；能力名未注册、数量越界返回 `validation_failed`，且不读取产生任何结论。
+
+预检结论仅为建议：`reservation` 恒为 `none`。预检之后的正式分配（W2）必须在自己的写事务内重新校验计划状态、能力目录和每个节点的资格，过期或被并发变化推翻的预检结论不能当作保证。租约请求可携带 `required_capabilities`，其内容参与请求指纹。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -219,8 +243,10 @@ ready --lease--> leased --report--> ready
 | entry | `cmd/zrc` | 进程启动、参数解析、信号关闭 |
 | httpapi | `internal/httpapi` | 路由、严格解码、中间件和错误映射 |
 | plan | `internal/plan` | 计划生命周期和区域版本规则 |
-| fleet | `internal/fleet` | 解析节点档案、唯一名称和分页查询 |
-| allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
+| fleet | `internal/fleet` | 解析节点档案、能力登记校验、唯一名称和分页查询 |
+| catalog | `internal/catalog` | 版本化节点能力目录 |
+| capacity | `internal/capacity` | 只读容量预检、单快照评估和有效期 |
+| allocation | `internal/allocation` | 节点筛选、能力复核、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
 | assessment | `internal/assessment` | 探针聚合和一致性判定 |
 | domain | `internal/domain` | 聚合、值校验、状态迁移和纯计算 |
@@ -256,10 +282,13 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/plans/{id}/activate`
 - `PATCH /v1/plans/{id}/complete`
 - `PATCH /v1/plans/{id}/leases`
+- `POST /v1/plans/{id}/capacity-prechecks`
 - `PATCH /v1/leases/{id}/release`
 - `PATCH /v1/leases/{id}/probes`
 - `PATCH /v1/plans/{id}/assessments`
 - `GET /v1/plans/{id}/assessments/latest`
+- `GET /v1/capabilities`
+- `PUT /v1/capabilities`
 
 ## 8. 工程机制
 

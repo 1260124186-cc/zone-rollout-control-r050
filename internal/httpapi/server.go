@@ -6,6 +6,8 @@ import (
 
 	"solo-0014-zone-rollout-control/internal/allocation"
 	"solo-0014-zone-rollout-control/internal/assessment"
+	"solo-0014-zone-rollout-control/internal/capacity"
+	"solo-0014-zone-rollout-control/internal/catalog"
 	"solo-0014-zone-rollout-control/internal/fleet"
 	"solo-0014-zone-rollout-control/internal/plan"
 	"solo-0014-zone-rollout-control/internal/platform"
@@ -13,13 +15,15 @@ import (
 )
 
 type Server struct {
-	plans       *plan.Service
-	fleet       *fleet.Service
-	allocations *allocation.Service
-	probes      *probe.Service
-	assessments *assessment.Service
-	ids         platform.IDGenerator
-	logger      *slog.Logger
+	plans        *plan.Service
+	fleet        *fleet.Service
+	allocations  *allocation.Service
+	probes       *probe.Service
+	assessments  *assessment.Service
+	capabilities *catalog.Service
+	capacity     *capacity.Service
+	ids          platform.IDGenerator
+	logger       *slog.Logger
 }
 
 func New(
@@ -28,17 +32,21 @@ func New(
 	allocations *allocation.Service,
 	probes *probe.Service,
 	assessments *assessment.Service,
+	capabilities *catalog.Service,
+	capacityService *capacity.Service,
 	ids platform.IDGenerator,
 	logger *slog.Logger,
 ) *Server {
 	return &Server{
-		plans:       plans,
-		fleet:       fleetService,
-		allocations: allocations,
-		probes:      probes,
-		assessments: assessments,
-		ids:         ids,
-		logger:      logger,
+		plans:        plans,
+		fleet:        fleetService,
+		allocations:  allocations,
+		probes:       probes,
+		assessments:  assessments,
+		capabilities: capabilities,
+		capacity:     capacityService,
+		ids:          ids,
+		logger:       logger,
 	}
 }
 

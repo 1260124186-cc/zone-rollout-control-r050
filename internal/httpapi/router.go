@@ -8,6 +8,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/nodes", s.enrollNode)
 	mux.HandleFunc("GET /v1/nodes", s.listNodes)
 
+	mux.HandleFunc("GET /v1/capabilities", s.getCapabilityCatalog)
+	mux.HandleFunc("PUT /v1/capabilities", s.replaceCapabilityCatalog)
+
 	mux.HandleFunc("PUT /v1/plans", s.createPlan)
 	mux.HandleFunc("GET /v1/plans", s.listPlans)
 	mux.HandleFunc("GET /v1/plans/{id}", s.getPlan)
@@ -16,6 +19,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /v1/plans/{id}/complete", s.completePlan)
 
 	mux.HandleFunc("PATCH /v1/plans/{id}/leases", s.allocateLeases)
+	mux.HandleFunc("POST /v1/plans/{id}/capacity-prechecks", s.capacityPrecheck)
 	mux.HandleFunc("PATCH /v1/leases/{id}/release", s.releaseLease)
 	mux.HandleFunc("PATCH /v1/leases/{id}/probes", s.submitProbe)
 

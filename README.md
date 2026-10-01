@@ -37,12 +37,14 @@ go run ./cmd/zrc \
 ```text
 cmd/zrc                     服务进程入口
 cmd/workflowprobe           工作流探针入口
-internal/domain             聚合、DNS 值校验、状态迁移和判定计算
+internal/domain             聚合、DNS 值校验、状态迁移、预检和判定计算
 internal/store              锁内副本事务和原子 JSON 持久化
 internal/platform           时钟、标识、游标和文件锁
 internal/plan               计划及区域版本服务
-internal/fleet              解析节点档案服务
-internal/allocation         节点选择和租约生命周期
+internal/fleet              解析节点档案服务（含能力登记校验）
+internal/catalog            版本化能力目录服务
+internal/capacity           只读容量预检服务
+internal/allocation         节点选择、能力复核和租约生命周期
 internal/probe              探针登记、幂等重放和租约完成
 internal/assessment         一致性聚合和最新结果查询
 internal/httpapi            HTTP 路由、中间件和响应映射
@@ -165,19 +167,47 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `GET` | `/healthz` | 进程健康检查 |
-| `PUT` | `/v1/nodes` | 登记解析节点 |
+| `PUT` | `/v1/nodes` | 登记解析节点（可携带能力名） |
 | `GET` | `/v1/nodes` | 按状态和区域分页查询节点 |
+| `GET` | `/v1/capabilities` | 查询节点能力目录及版本 |
+| `PUT` | `/v1/capabilities` | 替换能力目录（内容变化时版本递增） |
 | `PUT` | `/v1/plans` | 创建计划草稿 |
 | `GET` | `/v1/plans` | 按状态分页查询计划 |
 | `GET` | `/v1/plans/{id}` | 查询计划 |
 | `PATCH` | `/v1/plans/{id}/revisions` | 添加区域版本 |
 | `PATCH` | `/v1/plans/{id}/activate` | 激活计划 |
 | `PATCH` | `/v1/plans/{id}/complete` | 完成计划 |
-| `PATCH` | `/v1/plans/{id}/leases` | 给节点分配租约 |
+| `PATCH` | `/v1/plans/{id}/leases` | 给节点分配租约（可要求能力） |
+| `POST` | `/v1/plans/{id}/capacity-prechecks` | 只读容量预检 |
 | `PATCH` | `/v1/leases/{id}/release` | 提前释放租约 |
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
 | `GET` | `/v1/plans/{id}/assessments/latest` | 查询最近判定 |
+
+## 只读容量预检
+
+分配租约前可先做容量预检：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8090/v1/plans/<plan_id>/capacity-prechecks \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "region": "east",
+    "quantity": 2,
+    "required_capabilities": ["dnssec"]
+  }'
+```
+
+预检语义：
+
+- **只读**：不创建租约、不改变节点、不写审计事件；在单一存储快照（读锁）内完成。
+- **返回内容**：是否可满足（`satisfiable`）、按稳定顺序截断到 `quantity` 的可用节点视图、稳定阻塞原因（`plan_not_active`、`capacity_insufficient`，后者详情含就绪/已租/隔离计数与缺口）、区域内就绪/已租/隔离计数，以及 `snapshot_revision`、`catalog_version`、`evaluated_at`、`expires_at`、`ttl_seconds`（30 秒）。
+- **不是保证**：`reservation` 恒为 `none`，`guarantee` 恒为 `advisory_allocation_revalidates`。预检之后的正式分配会在自己的写事务里重新校验计划状态、能力目录和节点资格；过期结论不构成预留，节点可能已被并发请求租走。
+- **稳定**：同一快照和能力目录版本上重复预检返回完全一致的结果（含确定性 `id`）；节点变化推进 `snapshot_revision`，目录变化推进 `catalog_version`。
+- **有界**：`quantity` 范围 1 到 100，能力名最多 16 个，节点列表最多返回 `quantity` 条，总数另由计数字段给出。
+- 未注册的能力名在登记节点、预检和分配时都会被拒绝（`validation_failed`）。
+
+能力目录通过 `PUT /v1/capabilities` 整体替换，仅在键集合变化时版本递增；节点登记时声明的能力必须已在目录中。
 
 ## 状态及失败行为
 
@@ -216,6 +246,7 @@ go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
 go run ./cmd/workflowprobe consistency-assessment
+go run ./cmd/workflowprobe capacity-precheck
 ```
 
 探针不访问外部网络，也不依赖已有状态文件。

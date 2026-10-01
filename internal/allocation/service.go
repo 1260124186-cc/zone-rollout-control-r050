@@ -3,7 +3,6 @@ package allocation
 import (
 	"context"
 	"sort"
-	"strings"
 	"time"
 
 	"solo-0014-zone-rollout-control/internal/domain"
@@ -29,7 +28,11 @@ func (s *Service) Allocate(
 	if err := domain.ValidateLeaseInput(input); err != nil {
 		return domain.LeaseGroup{}, err
 	}
-	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input = domain.NormalizeLeaseInput(input)
+	requiredSet := make(map[string]struct{}, len(input.RequiredCapabilities))
+	for _, capability := range input.RequiredCapabilities {
+		requiredSet[capability] = struct{}{}
+	}
 	requestIndex := planID + "\x00" + input.RequestKey
 	fingerprint := domain.LeaseFingerprint(planID, input)
 	now := s.clock.Now().UTC()
@@ -62,6 +65,13 @@ func (s *Service) Allocate(
 			return nil
 		}
 
+		// Formal allocation never trusts a prior precheck: re-validate the
+		// capability catalog and every node's eligibility on this fresh
+		// snapshot, under the write lock.
+		if err := domain.ValidateCapabilitiesAgainstCatalog(input.RequiredCapabilities, state.CapabilityCatalog); err != nil {
+			return err
+		}
+
 		expireLeases(state, now)
 		candidates := make([]domain.ResolverNode, 0)
 		for _, node := range state.Nodes {
@@ -71,12 +81,16 @@ func (s *Service) Allocate(
 			if input.Region != "" && node.Region != input.Region {
 				continue
 			}
+			if !nodeHasCapabilities(node.Capabilities, requiredSet) {
+				continue
+			}
 			candidates = append(candidates, node)
 		}
 		if len(candidates) == 0 {
 			return domain.NewError(domain.CodeNodeUnavailable, "no eligible node is ready", map[string]any{
-				"plan_id": planID,
-				"region":  input.Region,
+				"plan_id":               planID,
+				"region":                input.Region,
+				"required_capabilities": input.RequiredCapabilities,
 			})
 		}
 		sort.Slice(candidates, func(i, j int) bool {
@@ -110,13 +124,14 @@ func (s *Service) Allocate(
 			leaseIDs = append(leaseIDs, leaseID)
 		}
 		group = domain.LeaseGroup{
-			ID:                 groupID,
-			PlanID:             planID,
-			RequestKey:         input.RequestKey,
-			RequestFingerprint: fingerprint,
-			Region:             input.Region,
-			LeaseIDs:           leaseIDs,
-			CreatedAt:          now,
+			ID:                   groupID,
+			PlanID:               planID,
+			RequestKey:           input.RequestKey,
+			RequestFingerprint:   fingerprint,
+			Region:               input.Region,
+			RequiredCapabilities: append([]string(nil), input.RequiredCapabilities...),
+			LeaseIDs:             leaseIDs,
+			CreatedAt:            now,
 		}
 		state.LeaseGroups[group.ID] = group
 		state.LeaseRequestKeys[requestIndex] = group.ID
@@ -127,6 +142,22 @@ func (s *Service) Allocate(
 		return nil
 	})
 	return group, err
+}
+
+func nodeHasCapabilities(nodeCapabilities []string, required map[string]struct{}) bool {
+	for capability := range required {
+		found := false
+		for _, owned := range nodeCapabilities {
+			if owned == capability {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) Release(ctx context.Context, leaseID string) (domain.NodeLease, error) {

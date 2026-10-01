@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -9,13 +10,16 @@ import (
 )
 
 const (
-	MaxZoneRunes       = 253
-	MaxAuthorityRunes  = 253
-	MaxNodeNameRunes   = 180
-	MaxRegionRunes     = 48
-	MinRequestKeyRunes = 8
-	MaxRequestKeyRunes = 64
-	MaxEntries         = 500
+	MaxZoneRunes        = 253
+	MaxAuthorityRunes   = 253
+	MaxNodeNameRunes    = 180
+	MaxRegionRunes      = 48
+	MinRequestKeyRunes  = 8
+	MaxRequestKeyRunes  = 64
+	MaxEntries          = 500
+	MaxCapabilities     = 100
+	MaxNodeCapabilities = 16
+	MaxPrecheckQuantity = 100
 )
 
 type PlanCreateInput struct {
@@ -32,16 +36,24 @@ type RevisionCreateInput struct {
 }
 
 type NodeCreateInput struct {
-	NodeName   string `json:"node_name"`
-	Region     string `json:"region"`
-	Quarantine bool   `json:"quarantine"`
+	NodeName     string   `json:"node_name"`
+	Region       string   `json:"region"`
+	Quarantine   bool     `json:"quarantine"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type LeaseInput struct {
-	RequestKey   string `json:"request_key"`
-	Region       string `json:"region"`
-	LeaseSeconds int    `json:"lease_seconds"`
-	MaxNodes     int    `json:"max_nodes"`
+	RequestKey           string   `json:"request_key"`
+	Region               string   `json:"region"`
+	LeaseSeconds         int      `json:"lease_seconds"`
+	MaxNodes             int      `json:"max_nodes"`
+	RequiredCapabilities []string `json:"required_capabilities,omitempty"`
+}
+
+// CapabilityCatalogInput replaces the catalog key set. Keys are normalized
+// and validated before the transaction applies the replacement.
+type CapabilityCatalogInput struct {
+	Capabilities []string `json:"capabilities"`
 }
 
 type ProbeInput struct {
@@ -176,14 +188,16 @@ func ValidateRevisionInput(input RevisionCreateInput) error {
 }
 
 func ValidateNodeInput(input NodeCreateInput, now time.Time) error {
-	input.NodeName = canonicalName(input.NodeName)
-	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	normalized := NormalizeNodeInput(input)
 	details := make(map[string]any)
-	if err := validateCanonicalName(input.NodeName); err != nil {
+	if err := validateCanonicalName(normalized.NodeName); err != nil {
 		details["node_name"] = err.Error()
 	}
-	if count := utf8.RuneCountInString(input.Region); count < 2 || count > MaxRegionRunes {
+	if count := utf8.RuneCountInString(normalized.Region); count < 2 || count > MaxRegionRunes {
 		details["region"] = "must contain between 2 and 48 characters"
+	}
+	if err := validateCapabilityList(normalized.Capabilities, MaxNodeCapabilities); err != nil {
+		details["capabilities"] = err.Error()
 	}
 	if len(details) > 0 {
 		return Validation("node input is invalid", details)
@@ -194,12 +208,31 @@ func ValidateNodeInput(input NodeCreateInput, now time.Time) error {
 func NormalizeNodeInput(input NodeCreateInput) NodeCreateInput {
 	input.NodeName = canonicalName(input.NodeName)
 	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input.Capabilities = normalizeCapabilities(input.Capabilities)
 	return input
 }
 
+// ValidateCapabilitiesAgainstCatalog rejects capability names that are not
+// registered in the current catalog. Catalog updates are the only way to
+// introduce a new name.
+func ValidateCapabilitiesAgainstCatalog(capabilities []string, catalog CapabilityCatalog) error {
+	unknown := make([]string, 0)
+	for _, capability := range capabilities {
+		if _, ok := catalog.Capabilities[capability]; !ok {
+			unknown = append(unknown, capability)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return Validation("capabilities are not registered in the catalog", map[string]any{
+		"unknown_capabilities": unknown,
+	})
+}
+
 func ValidateLeaseInput(input LeaseInput) error {
-	input.RequestKey = strings.TrimSpace(input.RequestKey)
-	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input = NormalizeLeaseInput(input)
 	details := make(map[string]any)
 	if err := validateRequestKey(input.RequestKey); err != nil {
 		details["request_key"] = err.Error()
@@ -210,11 +243,108 @@ func ValidateLeaseInput(input LeaseInput) error {
 	if input.LeaseSeconds < 30 || input.LeaseSeconds > 86400 {
 		details["lease_seconds"] = "must be between 30 and 86400"
 	}
-	if input.MaxNodes < 1 || input.MaxNodes > 100 {
+	if input.MaxNodes < 1 || input.MaxNodes > MaxPrecheckQuantity {
 		details["max_nodes"] = "must be between 1 and 100"
+	}
+	if err := validateCapabilityList(input.RequiredCapabilities, MaxNodeCapabilities); err != nil {
+		details["required_capabilities"] = err.Error()
 	}
 	if len(details) > 0 {
 		return Validation("lease input is invalid", details)
+	}
+	return nil
+}
+
+// NormalizeLeaseInput canonicalizes region and required capabilities so a
+// fingerprint never changes just because of casing or list order.
+func NormalizeLeaseInput(input LeaseInput) LeaseInput {
+	input.RequestKey = strings.TrimSpace(input.RequestKey)
+	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input.RequiredCapabilities = normalizeCapabilities(input.RequiredCapabilities)
+	return input
+}
+
+func ValidatePrecheckInput(input CapacityPrecheckInput) error {
+	input = NormalizePrecheckInput(input)
+	details := make(map[string]any)
+	if count := utf8.RuneCountInString(input.Region); count > MaxRegionRunes {
+		details["region"] = "must be at most 48 characters"
+	}
+	if input.Quantity < 1 || input.Quantity > MaxPrecheckQuantity {
+		details["quantity"] = "must be between 1 and 100"
+	}
+	if err := validateCapabilityList(input.RequiredCapabilities, MaxNodeCapabilities); err != nil {
+		details["required_capabilities"] = err.Error()
+	}
+	if len(details) > 0 {
+		return Validation("capacity precheck input is invalid", details)
+	}
+	return nil
+}
+
+func NormalizePrecheckInput(input CapacityPrecheckInput) CapacityPrecheckInput {
+	input.Region = strings.TrimSpace(strings.ToLower(input.Region))
+	input.RequiredCapabilities = normalizeCapabilities(input.RequiredCapabilities)
+	return input
+}
+
+func ValidateCatalogInput(input CapabilityCatalogInput) error {
+	input.Capabilities = normalizeCapabilities(input.Capabilities)
+	if err := validateCapabilityList(input.Capabilities, MaxCapabilities); err != nil {
+		return Validation("capability catalog input is invalid", map[string]any{
+			"capabilities": err.Error(),
+		})
+	}
+	return nil
+}
+
+func NormalizeCatalogInput(input CapabilityCatalogInput) CapabilityCatalogInput {
+	input.Capabilities = normalizeCapabilities(input.Capabilities)
+	return input
+}
+
+func normalizeCapabilities(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		key := strings.TrimSpace(strings.ToLower(value))
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// validateCapabilityList checks the already-normalized capability list for
+// syntactic validity, duplicates and size bounds.
+func validateCapabilityList(capabilities []string, limit int) error {
+	if len(capabilities) > limit {
+		return Validation(fmt.Sprintf("must contain at most %d items", limit), nil)
+	}
+	for _, capability := range capabilities {
+		if err := validateCapabilityKey(capability); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateCapabilityKey(value string) error {
+	count := utf8.RuneCountInString(value)
+	if count < 3 || count > 48 {
+		return Validation("must contain between 3 and 48 characters", nil)
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			continue
+		}
+		return Validation("may contain only lowercase letters, digits, hyphens, and underscores", nil)
 	}
 	return nil
 }
